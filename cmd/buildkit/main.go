@@ -22,8 +22,6 @@ func goBuildBase() llb.State {
 	return goAlpine.
 		AddEnv("PATH", "/usr/local/go/bin:"+system.DefaultPathEnv).
 		AddEnv("GOPATH", "/go").
-		AddEnv("GOOS", "linux").
-		AddEnv("GOARCH", "amd64").
 		Run(llb.Shlex("apk add --no-cache git make")).Root()
 }
 
