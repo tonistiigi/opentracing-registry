@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"runtime"
 	"strings"
@@ -15,18 +14,11 @@ import (
 // UserAgent (if non-empty) will be tacked onto the User-Agent string in requests.
 var UserAgent string
 
-// HTTPClient is an HTTP client with a reasonable timeout value.
-var HTTPClient = http.Client{
-	Transport: &http.Transport{
-		Dial: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).Dial,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	},
-}
+// HTTPTimeout is used to override the default HTTP timeout of 10 seconds.
+var HTTPTimeout = 10 * time.Second
+
+// defaultClient is an HTTP client with a reasonable timeout value.
+var defaultClient = http.Client{Timeout: HTTPTimeout}
 
 const (
 	// defaultGoUserAgent is the Go HTTP package user agent string. Too
@@ -42,14 +34,14 @@ const (
 func httpHead(url string) (resp *http.Response, err error) {
 	req, err := http.NewRequest("HEAD", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to head %q: %v", url, err)
+		return nil, err
 	}
 
 	req.Header.Set("User-Agent", userAgent())
 
-	resp, err = HTTPClient.Do(req)
+	resp, err = defaultClient.Do(req)
 	if err != nil {
-		return resp, fmt.Errorf("failed to do head %q: %v", url, err)
+		return resp, err
 	}
 	resp.Body.Close()
 	return resp, err
@@ -60,12 +52,12 @@ func httpHead(url string) (resp *http.Response, err error) {
 func httpPost(url string, bodyType string, body io.Reader) (resp *http.Response, err error) {
 	req, err := http.NewRequest("POST", url, body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to post %q: %v", url, err)
+		return nil, err
 	}
 	req.Header.Set("Content-Type", bodyType)
 	req.Header.Set("User-Agent", userAgent())
 
-	return HTTPClient.Do(req)
+	return defaultClient.Do(req)
 }
 
 // httpGet performs a GET request with a proper User-Agent string.
@@ -73,11 +65,11 @@ func httpPost(url string, bodyType string, body io.Reader) (resp *http.Response,
 func httpGet(url string) (resp *http.Response, err error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get %q: %v", url, err)
+		return nil, err
 	}
 	req.Header.Set("User-Agent", userAgent())
 
-	return HTTPClient.Do(req)
+	return defaultClient.Do(req)
 }
 
 // getJSON performs an HTTP GET request and parses the response body
@@ -85,7 +77,7 @@ func httpGet(url string) (resp *http.Response, err error) {
 func getJSON(uri string, respBody interface{}) (http.Header, error) {
 	resp, err := httpGet(uri)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get json %q: %v", uri, err)
+		return nil, fmt.Errorf("failed to get %q: %v", uri, err)
 	}
 	defer resp.Body.Close()
 
@@ -108,41 +100,10 @@ func postJSON(j *jws, uri string, reqBody, respBody interface{}) (http.Header, e
 	if err != nil {
 		return nil, fmt.Errorf("Failed to post JWS message. -> %v", err)
 	}
-
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= http.StatusBadRequest {
-
-		err := handleHTTPError(resp)
-
-		switch err.(type) {
-
-		case NonceError:
-
-			// Retry once if the nonce was invalidated
-
-			retryResp, err := j.post(uri, jsonBytes)
-			if err != nil {
-				return nil, fmt.Errorf("Failed to post JWS message. -> %v", err)
-			}
-
-			defer retryResp.Body.Close()
-
-			if retryResp.StatusCode >= http.StatusBadRequest {
-				return retryResp.Header, handleHTTPError(retryResp)
-			}
-
-			if respBody == nil {
-				return retryResp.Header, nil
-			}
-
-			return retryResp.Header, json.NewDecoder(retryResp.Body).Decode(respBody)
-
-		default:
-			return resp.Header, err
-
-		}
-
+		return resp.Header, handleHTTPError(resp)
 	}
 
 	if respBody == nil {

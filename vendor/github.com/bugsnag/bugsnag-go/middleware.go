@@ -30,13 +30,9 @@ func (stack *middlewareStack) Run(event *Event, config *Configuration, next func
 	for i := range stack.before {
 		before := stack.before[len(stack.before)-i-1]
 
-		severity := event.Severity
 		err := stack.runBeforeFilter(before, event, config)
 		if err != nil {
 			return err
-		}
-		if event.Severity != severity {
-			event.handledState.SeverityReason = SeverityReasonCallbackSpecified
 		}
 	}
 
@@ -46,7 +42,7 @@ func (stack *middlewareStack) Run(event *Event, config *Configuration, next func
 func (stack *middlewareStack) runBeforeFilter(f beforeFunc, event *Event, config *Configuration) error {
 	defer func() {
 		if err := recover(); err != nil {
-			config.logf("bugsnag/middleware: unexpected panic: %v", err)
+			config.log("bugsnag/middleware: unexpected panic: %v", err)
 		}
 	}()
 
@@ -70,14 +66,16 @@ func httpRequestMiddleware(event *Event, config *Configuration) error {
 			}
 
 			event.MetaData.Update(MetaData{
-				"request": {
-					"clientIp":   request.RemoteAddr,
-					"httpMethod": request.Method,
-					"url":        proto + request.Host + request.RequestURI,
-					"params":     request.URL.Query(),
-					"headers":    request.Header,
+				"Request": {
+					"RemoteAddr": request.RemoteAddr,
+					"Method":     request.Method,
+					"Url":        proto + request.Host + request.RequestURI,
+					"Params":     request.URL.Query(),
 				},
 			})
+
+			// Add headers as a separate tab.
+			event.MetaData.AddStruct("Headers", request.Header)
 
 			// Default context to Path
 			if event.Context == "" {

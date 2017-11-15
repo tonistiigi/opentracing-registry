@@ -10,7 +10,7 @@ GOFILES=$(shell find . -type f -name '*.go')
 
 ${PREFIX}/bin/registry: $(GOFILES)
 	@echo "+ $@"
-	@go run cmd/buildkit/main.go | buildctl build
+	@go run cmd/buildkit-registry/main.go | buildctl build --local src=.
 
 binaries: ${PREFIX}/bin/registry
 	@echo "+ $@"

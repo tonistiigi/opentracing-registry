@@ -297,7 +297,10 @@ type Server struct {
 	// DecorateWriter is optional, allows customization of the process that writes raw DNS messages.
 	DecorateWriter DecorateWriter
 
-	// Shutdown handling
+	// Graceful shutdown handling
+
+	inFlight sync.WaitGroup
+
 	lock    sync.RWMutex
 	started bool
 }
@@ -336,7 +339,7 @@ func (srv *Server) ListenAndServe() error {
 		network := "tcp"
 		if srv.Net == "tcp4-tls" {
 			network = "tcp4"
-		} else if srv.Net == "tcp6-tls" {
+		} else if srv.Net == "tcp6" {
 			network = "tcp6"
 		}
 
@@ -409,8 +412,10 @@ func (srv *Server) ActivateAndServe() error {
 	return &Error{err: "bad listeners"}
 }
 
-// Shutdown shuts down a server. After a call to Shutdown, ListenAndServe and
-// ActivateAndServe will return.
+// Shutdown gracefully shuts down a server. After a call to Shutdown, ListenAndServe and
+// ActivateAndServe will return. All in progress queries are completed before the server
+// is taken down. If the Shutdown is taking longer than the reading timeout an error
+// is returned.
 func (srv *Server) Shutdown() error {
 	srv.lock.Lock()
 	if !srv.started {
@@ -426,7 +431,19 @@ func (srv *Server) Shutdown() error {
 	if srv.Listener != nil {
 		srv.Listener.Close()
 	}
-	return nil
+
+	fin := make(chan bool)
+	go func() {
+		srv.inFlight.Wait()
+		fin <- true
+	}()
+
+	select {
+	case <-time.After(srv.getReadTimeout()):
+		return &Error{err: "server shutdown is pending"}
+	case <-fin:
+		return nil
+	}
 }
 
 // getReadTimeout is a helper func to use system timeout if server did not intend to change it.
@@ -476,6 +493,7 @@ func (srv *Server) serveTCP(l net.Listener) error {
 		if err != nil {
 			continue
 		}
+		srv.inFlight.Add(1)
 		go srv.serve(rw.RemoteAddr(), handler, m, nil, nil, rw)
 	}
 }
@@ -511,12 +529,15 @@ func (srv *Server) serveUDP(l *net.UDPConn) error {
 		if err != nil {
 			continue
 		}
+		srv.inFlight.Add(1)
 		go srv.serve(s.RemoteAddr(), handler, m, l, s, nil)
 	}
 }
 
 // Serve a new connection.
 func (srv *Server) serve(a net.Addr, h Handler, m []byte, u *net.UDPConn, s *SessionUDP, t net.Conn) {
+	defer srv.inFlight.Done()
+
 	w := &response{tsigSecret: srv.TsigSecret, udp: u, tcp: t, remoteAddr: a, udpSession: s}
 	if srv.DecorateWriter != nil {
 		w.writer = srv.DecorateWriter(w)

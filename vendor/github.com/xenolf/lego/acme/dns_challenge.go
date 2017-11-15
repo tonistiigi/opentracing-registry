@@ -11,47 +11,23 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/net/publicsuffix"
 )
 
 type preCheckDNSFunc func(fqdn, value string) (bool, error)
 
 var (
-	// PreCheckDNS checks DNS propagation before notifying ACME that
-	// the DNS challenge is ready.
-	PreCheckDNS preCheckDNSFunc = checkDNSPropagation
+	preCheckDNS preCheckDNSFunc = checkDNSPropagation
 	fqdnToZone                  = map[string]string{}
 )
 
-const defaultResolvConf = "/etc/resolv.conf"
-
-var defaultNameservers = []string{
+var RecursiveNameservers = []string{
 	"google-public-dns-a.google.com:53",
 	"google-public-dns-b.google.com:53",
 }
 
-var RecursiveNameservers = getNameservers(defaultResolvConf, defaultNameservers)
-
 // DNSTimeout is used to override the default DNS timeout of 10 seconds.
 var DNSTimeout = 10 * time.Second
-
-// getNameservers attempts to get systems nameservers before falling back to the defaults
-func getNameservers(path string, defaults []string) []string {
-	config, err := dns.ClientConfigFromFile(path)
-	if err != nil || len(config.Servers) == 0 {
-		return defaults
-	}
-
-	systemNameservers := []string{}
-	for _, server := range config.Servers {
-		// ensure all servers have a port number
-		if _, _, err := net.SplitHostPort(server); err != nil {
-			systemNameservers = append(systemNameservers, net.JoinHostPort(server, "53"))
-		} else {
-			systemNameservers = append(systemNameservers, server)
-		}
-	}
-	return systemNameservers
-}
 
 // DNS01Record returns a DNS record which will fulfill the `dns-01` challenge
 func DNS01Record(domain, keyAuth string) (fqdn string, value string, ttl int) {
@@ -97,7 +73,7 @@ func (s *dnsChallenge) Solve(chlng challenge, domain string) error {
 
 	fqdn, value, _ := DNS01Record(domain, keyAuth)
 
-	logf("[INFO][%s] Checking DNS record propagation using %+v", domain, RecursiveNameservers)
+	logf("[INFO][%s] Checking DNS record propagation...", domain)
 
 	var timeout, interval time.Duration
 	switch provider := s.provider.(type) {
@@ -108,7 +84,7 @@ func (s *dnsChallenge) Solve(chlng challenge, domain string) error {
 	}
 
 	err = WaitFor(timeout, interval, func() (bool, error) {
-		return PreCheckDNS(fqdn, value)
+		return preCheckDNS(fqdn, value)
 	})
 	if err != nil {
 		return err
@@ -193,7 +169,7 @@ func dnsQuery(fqdn string, rtype uint16, nameservers []string, recursive bool) (
 
 		if err == dns.ErrTruncated {
 			tcp := &dns.Client{Net: "tcp", Timeout: DNSTimeout}
-			// If the TCP request succeeds, the err will reset to nil
+			// If the TCP request suceeds, the err will reset to nil
 			in, _, err = tcp.Exchange(m, ns)
 		}
 
@@ -210,7 +186,7 @@ func lookupNameservers(fqdn string) ([]string, error) {
 
 	zone, err := FindZoneByFqdn(fqdn, RecursiveNameservers)
 	if err != nil {
-		return nil, fmt.Errorf("Could not determine the zone: %v", err)
+		return nil, err
 	}
 
 	r, err := dnsQuery(zone, dns.TypeNS, RecursiveNameservers, true)
@@ -230,42 +206,53 @@ func lookupNameservers(fqdn string) ([]string, error) {
 	return nil, fmt.Errorf("Could not determine authoritative nameservers")
 }
 
-// FindZoneByFqdn determines the zone apex for the given fqdn by recursing up the
-// domain labels until the nameserver returns a SOA record in the answer section.
+// FindZoneByFqdn determines the zone of the given fqdn
 func FindZoneByFqdn(fqdn string, nameservers []string) (string, error) {
 	// Do we have it cached?
 	if zone, ok := fqdnToZone[fqdn]; ok {
 		return zone, nil
 	}
 
-	labelIndexes := dns.Split(fqdn)
-	for _, index := range labelIndexes {
-		domain := fqdn[index:]
-
-		in, err := dnsQuery(domain, dns.TypeSOA, nameservers, true)
-		if err != nil {
-			return "", err
+	// Query the authoritative nameserver for a hopefully non-existing SOA record,
+	// in the authority section of the reply it will have the SOA of the
+	// containing zone. rfc2308 has this to say on the subject:
+	//   Name servers authoritative for a zone MUST include the SOA record of
+	//   the zone in the authority section of the response when reporting an
+	//   NXDOMAIN or indicating that no data (NODATA) of the requested type exists
+	in, err := dnsQuery(fqdn, dns.TypeSOA, nameservers, true)
+	if err != nil {
+		return "", err
+	}
+	if in.Rcode != dns.RcodeNameError {
+		if in.Rcode != dns.RcodeSuccess {
+			return "", fmt.Errorf("The NS returned %s for %s", dns.RcodeToString[in.Rcode], fqdn)
 		}
-
-		// Any response code other than NOERROR and NXDOMAIN is treated as error
-		if in.Rcode != dns.RcodeNameError && in.Rcode != dns.RcodeSuccess {
-			return "", fmt.Errorf("Unexpected response code '%s' for %s",
-				dns.RcodeToString[in.Rcode], domain)
-		}
-
-		// Check if we got a SOA RR in the answer section
-		if in.Rcode == dns.RcodeSuccess {
-			for _, ans := range in.Answer {
-				if soa, ok := ans.(*dns.SOA); ok {
-					zone := soa.Hdr.Name
-					fqdnToZone[fqdn] = zone
-					return zone, nil
-				}
+		// We have a success, so one of the answers has to be a SOA RR
+		for _, ans := range in.Answer {
+			if soa, ok := ans.(*dns.SOA); ok {
+				return checkIfTLD(fqdn, soa)
 			}
 		}
+		// Or it is NODATA, fall through to NXDOMAIN
 	}
+	// Search the authority section for our precious SOA RR
+	for _, ns := range in.Ns {
+		if soa, ok := ns.(*dns.SOA); ok {
+			return checkIfTLD(fqdn, soa)
+		}
+	}
+	return "", fmt.Errorf("The NS did not return the expected SOA record in the authority section")
+}
 
-	return "", fmt.Errorf("Could not find the start of authority")
+func checkIfTLD(fqdn string, soa *dns.SOA) (string, error) {
+	zone := soa.Hdr.Name
+	// If we ended up on one of the TLDs, it means the domain did not exist.
+	publicsuffix, _ := publicsuffix.PublicSuffix(UnFqdn(zone))
+	if publicsuffix == UnFqdn(zone) {
+		return "", fmt.Errorf("Could not determine zone authoritatively")
+	}
+	fqdnToZone[fqdn] = zone
+	return zone, nil
 }
 
 // ClearFqdnCache clears the cache of fqdn to zone mappings. Primarily used in testing.

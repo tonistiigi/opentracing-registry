@@ -10,7 +10,6 @@ import (
 
 const (
 	tosAgreementError = "Must agree to subscriber agreement before any further actions"
-	invalidNonceError = "JWS has invalid anti-replay nonce"
 )
 
 // RemoteError is the base type for all errors specific to the ACME protocol.
@@ -28,12 +27,6 @@ func (e RemoteError) Error() string {
 // accept the TOS.
 // TODO: include the new TOS url if we can somehow obtain it.
 type TOSError struct {
-	RemoteError
-}
-
-// NonceError represents the error which is returned if the
-// nonce sent by the client was not accepted by the server.
-type NonceError struct {
 	RemoteError
 }
 
@@ -61,17 +54,20 @@ func (c challengeError) Error() string {
 func handleHTTPError(resp *http.Response) error {
 	var errorDetail RemoteError
 
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "application/json" || contentType == "application/problem+json" {
-		err := json.NewDecoder(resp.Body).Decode(&errorDetail)
+	contenType := resp.Header.Get("Content-Type")
+	// try to decode the content as JSON
+	if contenType == "application/json" || contenType == "application/problem+json" {
+		decoder := json.NewDecoder(resp.Body)
+		err := decoder.Decode(&errorDetail)
 		if err != nil {
 			return err
 		}
 	} else {
-		detailBytes, err := ioutil.ReadAll(limitReader(resp.Body, maxBodySize))
+		detailBytes, err := ioutil.ReadAll(limitReader(resp.Body, 1024*1024))
 		if err != nil {
 			return err
 		}
+
 		errorDetail.Detail = string(detailBytes)
 	}
 
@@ -80,10 +76,6 @@ func handleHTTPError(resp *http.Response) error {
 	// Check for errors we handle specifically
 	if errorDetail.StatusCode == http.StatusForbidden && errorDetail.Detail == tosAgreementError {
 		return TOSError{errorDetail}
-	}
-
-	if errorDetail.StatusCode == http.StatusBadRequest && strings.HasPrefix(errorDetail.Detail, invalidNonceError) {
-		return NonceError{errorDetail}
 	}
 
 	return errorDetail

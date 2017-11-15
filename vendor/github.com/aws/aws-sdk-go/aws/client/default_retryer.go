@@ -2,7 +2,6 @@ package client
 
 import (
 	"math/rand"
-	"strconv"
 	"sync"
 	"time"
 
@@ -16,11 +15,11 @@ import (
 // the MaxRetries method:
 //
 //		type retryer struct {
-//      client.DefaultRetryer
+//      service.DefaultRetryer
 //    }
 //
 //    // This implementation always has 100 max retries
-//    func (d retryer) MaxRetries() int { return 100 }
+//    func (d retryer) MaxRetries() uint { return 100 }
 type DefaultRetryer struct {
 	NumMaxRetries int
 }
@@ -39,10 +38,6 @@ func (d DefaultRetryer) RetryRules(r *request.Request) time.Duration {
 	minTime := 30
 	throttle := d.shouldThrottle(r)
 	if throttle {
-		if delay, ok := getRetryDelay(r); ok {
-			return delay
-		}
-
 		minTime = 500
 	}
 
@@ -59,12 +54,6 @@ func (d DefaultRetryer) RetryRules(r *request.Request) time.Duration {
 
 // ShouldRetry returns true if the request should be retried.
 func (d DefaultRetryer) ShouldRetry(r *request.Request) bool {
-	// If one of the other handlers already set the retry state
-	// we don't want to override it based on the service's state
-	if r.Retryable != nil {
-		return *r.Retryable
-	}
-
 	if r.HTTPResponse.StatusCode >= 500 {
 		return true
 	}
@@ -73,49 +62,12 @@ func (d DefaultRetryer) ShouldRetry(r *request.Request) bool {
 
 // ShouldThrottle returns true if the request should be throttled.
 func (d DefaultRetryer) shouldThrottle(r *request.Request) bool {
-	switch r.HTTPResponse.StatusCode {
-	case 429:
-	case 502:
-	case 503:
-	case 504:
-	default:
-		return r.IsErrorThrottle()
+	if r.HTTPResponse.StatusCode == 502 ||
+		r.HTTPResponse.StatusCode == 503 ||
+		r.HTTPResponse.StatusCode == 504 {
+		return true
 	}
-
-	return true
-}
-
-// This will look in the Retry-After header, RFC 7231, for how long
-// it will wait before attempting another request
-func getRetryDelay(r *request.Request) (time.Duration, bool) {
-	if !canUseRetryAfterHeader(r) {
-		return 0, false
-	}
-
-	delayStr := r.HTTPResponse.Header.Get("Retry-After")
-	if len(delayStr) == 0 {
-		return 0, false
-	}
-
-	delay, err := strconv.Atoi(delayStr)
-	if err != nil {
-		return 0, false
-	}
-
-	return time.Duration(delay) * time.Second, true
-}
-
-// Will look at the status code to see if the retry header pertains to
-// the status code.
-func canUseRetryAfterHeader(r *request.Request) bool {
-	switch r.HTTPResponse.StatusCode {
-	case 429:
-	case 503:
-	default:
-		return false
-	}
-
-	return true
+	return r.IsErrorThrottle()
 }
 
 // lockedSource is a thread-safe implementation of rand.Source

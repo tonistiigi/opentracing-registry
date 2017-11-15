@@ -3,15 +3,12 @@
 package bugsnag
 
 import (
-	"github.com/bugsnag/bugsnag-go/errors"
 	"github.com/bugsnag/panicwrap"
+	"github.com/bugsnag/bugsnag-go/errors"
 )
 
-// Forks and re-runs your program to add panic monitoring. This function does
-// not return on one process, instead listening on stderr of the other process,
-// which returns nil.
-//
-// Related: https://godoc.org/github.com/bugsnag/panicwrap#BasicMonitor
+// NOTE: this function does not return when you call it, instead it
+// re-exec()s the current process with panic monitoring.
 func defaultPanicHandler() {
 	defer defaultNotifier.dontPanic()
 
@@ -19,13 +16,12 @@ func defaultPanicHandler() {
 		toNotify, err := errors.ParsePanic(output)
 
 		if err != nil {
-			defaultNotifier.Config.logf("bugsnag.handleUncaughtPanic: %v", err)
+			defaultNotifier.Config.log("bugsnag.handleUncaughtPanic: %v", err)
 		}
-		state := HandledState{SeverityReasonUnhandledPanic, SeverityError, true, ""}
-		Notify(toNotify, state, Configuration{Synchronous: true})
+		Notify(toNotify, SeverityError, Configuration{Synchronous: true})
 	})
 
 	if err != nil {
-		defaultNotifier.Config.logf("bugsnag.handleUncaughtPanic: %v", err)
+		defaultNotifier.Config.log("bugsnag.handleUncaughtPanic: %v", err)
 	}
 }
